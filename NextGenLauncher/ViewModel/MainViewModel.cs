@@ -13,6 +13,7 @@ using Microsoft.Win32;
 using NextGenLauncher.Data;
 using NextGenLauncher.Exceptions;
 using NextGenLauncher.Messages;
+using NextGenLauncher.Proxy;
 using NextGenLauncher.Services;
 using NextGenLauncher.Services.Servers;
 using NextGenLauncher.Utils;
@@ -40,7 +41,7 @@ namespace NextGenLauncher.ViewModel
         private string _password;
         private bool _inAuthentication;
         private AuthenticationInfo _authenticationInfo;
-        private bool _gameRunning;
+        private bool _canPlay;
 
         /// <summary>
         /// The list of available servers
@@ -100,6 +101,9 @@ namespace NextGenLauncher.ViewModel
             _serverService = serverService;
             _serverModService = serverModService;
 
+            // Start critical services
+            ServerProxy.Instance.Start();
+
             // Setup
             Servers = new ObservableCollection<Server>();
             LoginCommand = new RelayCommand(ExecuteLoginCommand, CanExecuteLoginCommand);
@@ -116,31 +120,37 @@ namespace NextGenLauncher.ViewModel
 
         private bool CanExecutePlayCommand()
         {
-            return !_gameRunning;
+            return _canPlay;
         }
 
         private async void ExecutePlayCommand()
         {
-            Process process = new Process();
+            _canPlay = false;
+            PlayCommand.RaiseCanExecuteChanged();
             var gameDataPath = Path.Combine((string)Registry.GetValue(@"HKEY_LOCAL_MACHINE\software\SoapDev\Soapbox Race World",
                 "GameInstallDir", ""), "Data");
-            process.StartInfo.FileName =
+            string fileName =
                 Path.Combine(
                     gameDataPath, "nfsw.exe");
-            if (!File.Exists(process.StartInfo.FileName))
+            if (!File.Exists(fileName))
             {
-                throw new PlayException("Game executable does not exist: " + process.StartInfo.FileName);
+                throw new PlayException("Game executable does not exist: " + fileName);
             }
 
             // Download mods
-            PlayProgress.IsIndeterminate = true;
-            PlayProgress.ProgressText = "Installing mod system...";
-            await _serverModService.InstallModSystemAsync(gameDataPath);
-            PlayProgress.ProgressText = "Downloading mods...";
-            await _serverModService.DownloadServerModsAsync(SelectedServer, gameDataPath);
+            await InstallModSystem(gameDataPath);
+            await DownloadServerMods(gameDataPath);
+            LaunchGame(fileName);
+        }
+
+        private void LaunchGame(string fileName)
+        {
             PlayProgress.IsIndeterminate = false;
             PlayProgress.ProgressValue = 100;
             PlayProgress.ProgressText = "Launching game...";
+
+            Process process = new Process();
+            process.StartInfo.FileName = fileName;
 
             if (_authenticationInfo == null)
             {
@@ -152,21 +162,65 @@ namespace NextGenLauncher.ViewModel
                 throw new PlayException("PlayCommand somehow executed without a selected server. Great.");
             }
 
-            process.StartInfo.Arguments = $"US {_selectedServer.ServerAddress} {_authenticationInfo.LoginToken} {_authenticationInfo.UserId}";
+            process.StartInfo.Arguments =
+                $"US http://127.0.0.1:4080/nfsw/Engine.svc {_authenticationInfo.LoginToken} {_authenticationInfo.UserId}";
+
+            // Set up handlers
+            process.EnableRaisingEvents = true;
+            process.Exited += HandleGameExited;
+
+            // Send signal to proxy
+            ServerProxy.Instance.SetCurrentServer(_selectedServer);
 
             if (!process.Start())
             {
                 throw new PlayException("Failed to start game process");
             }
 
-            _gameRunning = true;
-            PlayCommand.RaiseCanExecuteChanged();
+            int processorAffinity = 0;
+            for (int i = 0; i < Math.Min(Math.Max(1, Environment.ProcessorCount), 8); i++)
+            {
+                processorAffinity |= 1 << i;
+            }
+
+            process.ProcessorAffinity = (IntPtr) processorAffinity;
+
+            //process.ProcessorAffinity = (IntPtr)0b11;
+        }
+
+        private void HandleGameExited(object sender, EventArgs e)
+        {
+            Process process = (Process) sender;
+
+            if (process.ExitCode != 0)
+            {
+                var betterCode = unchecked((uint) process.ExitCode);
+
+                throw new PlayException($"Game exited abnormally. Exit code: {process.ExitCode} (0x{betterCode:X8}). Report this to an administrator!");
+            }
+
+            PlayProgress.ProgressText = "Game is done. Restart the launcher to play again.";
+        }
+
+        private async Task DownloadServerMods(string gameDataPath)
+        {
+            PlayProgress.ProgressText = "Downloading mods...";
+            await _serverModService.DownloadServerModsAsync(SelectedServer, gameDataPath);
+        }
+
+        private async Task InstallModSystem(string gameDataPath)
+        {
+            PlayProgress.IsIndeterminate = true;
+            PlayProgress.ProgressText = "Installing mod system...";
+            await _serverModService.InstallModSystemAsync(gameDataPath);
         }
 
         private void HandleAuthenticationInfoUpdatedMessage(AuthenticationInfoUpdatedMessage obj)
         {
             InAuthentication = false;
             _authenticationInfo = obj.Info;
+            _canPlay = true;
+            PlayCommand.RaiseCanExecuteChanged();
         }
 
         private async void ExecuteLoginCommand()

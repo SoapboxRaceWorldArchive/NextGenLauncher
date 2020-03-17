@@ -1,21 +1,23 @@
-﻿using GalaSoft.MvvmLight;
+﻿using Flurl;
+using Flurl.Http;
+using GalaSoft.MvvmLight;
 using GalaSoft.MvvmLight.CommandWpf;
 using Ionic.Zip;
 using Microsoft.Win32;
+using Microsoft.WindowsAPICodePack.Dialogs;
 using Newtonsoft.Json;
 using NextGenLauncher.Data;
 using NextGenLauncher.Exceptions;
 using NextGenLauncher.ViewModel.Installer;
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
+using System.Net.Http;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
-using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Xml;
 
@@ -36,6 +38,7 @@ namespace NextGenLauncher.ViewModel
                 Set(ref _isInstallationHappening, value);
                 CanChangeOptions = !value;
                 InstallCommand.RaiseCanExecuteChanged();
+                ChangeInstallationDirectoryCommand.RaiseCanExecuteChanged();
             }
         }
 
@@ -55,6 +58,8 @@ namespace NextGenLauncher.ViewModel
             }
         }
 
+        public RelayCommand ChangeInstallationDirectoryCommand { get; }
+
         public List<GameLanguageOption> LanguageOptions { get; }
 
         public GameLanguageOption SelectedLanguageOption
@@ -69,6 +74,7 @@ namespace NextGenLauncher.ViewModel
 
         public InstallerViewModel()
         {
+            ChangeInstallationDirectoryCommand = new RelayCommand(ExecuteChangeInstallationDirectoryCommand, () => !IsInstallationHappening);
             InstallCommand = new RelayCommand(ExecuteInstallCommand, () => !string.IsNullOrWhiteSpace(InstallationDirectory) && !IsInstallationHappening);
             InstallationDirectory =
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -90,20 +96,52 @@ namespace NextGenLauncher.ViewModel
             IsInstallationHappening = false;
         }
 
-        private void ExecuteInstallCommand()
+        private void ExecuteChangeInstallationDirectoryCommand()
+        {
+            CommonOpenFileDialog folderBrowser = new CommonOpenFileDialog();
+            folderBrowser.Title = "Select game folder";
+            folderBrowser.AllowNonFileSystemItems = false;
+            folderBrowser.EnsurePathExists = true;
+            folderBrowser.EnsureReadOnly = false;
+            folderBrowser.EnsureValidNames = true;
+            folderBrowser.Multiselect = false;
+            folderBrowser.IsFolderPicker = true;
+            folderBrowser.InitialDirectory = InstallationDirectory;
+
+            if (folderBrowser.ShowDialog() == CommonFileDialogResult.Ok)
+            {
+                InstallationDirectory = folderBrowser.FileName;
+            }
+        }
+
+        private async void ExecuteInstallCommand()
         {
             IsInstallationHappening = true;
+
+            DirectoryInfo file = new DirectoryInfo(InstallationDirectory);
+            DriveInfo drive = new DriveInfo(file.Root.FullName);
+
+            // some validation
+
+            if (!drive.IsReady)
+            {
+                throw new InstallerException("drive.IsReady returned false!");
+            }
+
+            // 8GB requirement
+            if (drive.AvailableFreeSpace < 8589934592)
+            {
+                throw new InstallerException("At least 8 GB of space must be available on drive: " + drive.Name);
+            }
+
+            if (!string.Equals(drive.DriveFormat, "NTFS", StringComparison.InvariantCulture))
+            {
+                throw new InstallerException("Only NTFS drives are supported. DriveFormat=" + drive.DriveFormat);
+            }
+
             if (Directory.Exists(InstallationDirectory))
             {
-                if (MessageBox.Show("Game installation detected. Remove?", "Launcher", MessageBoxButton.YesNo,
-                        MessageBoxImage.Warning) == MessageBoxResult.Yes)
-                {
-                    Directory.Delete(InstallationDirectory, true);
-                }
-                else
-                {
-                    throw new InstallerException($"Game directory '{InstallationDirectory}' already exists. Cannot continue installation.");
-                }
+                Directory.Delete(InstallationDirectory, true);
             }
 
             SecurityIdentifier identity = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
@@ -113,22 +151,81 @@ namespace NextGenLauncher.ViewModel
                 AccessControlType.Allow));
             Directory.CreateDirectory(InstallationDirectory, accessControl);
 
-            BackgroundWorker worker = new BackgroundWorker();
-            worker.WorkerReportsProgress = true;
-            worker.DoWork += DownloadWorker_DoWork;
-            worker.ProgressChanged += DownloadWorker_OnProgressChanged;
-            worker.RunWorkerCompleted += DownloadWorker_OnRunWorkerCompleted;
-            worker.RunWorkerAsync();
-        }
+            await Task.Run(() =>
+            {
+                IProgress<DownloadState> progress = new Progress<DownloadState>(HandleDownloadProgress);
 
-        private void DownloadWorker_OnRunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
-        {
+                DownloadGameFiles(progress);
+
+                InstallProgress.ProgressValue = 0;
+                InstallProgress.ProgressText = "";
+                InstallProgress.IsIndeterminate = true;
+
+                CreateFirewallRules();
+                CreateRegistryData();
+                UpdateUserSettings();
+            });
+
             InstallProgress.ProgressValue = 0;
             InstallProgress.IsIndeterminate = false;
             InstallProgress.ProgressText = "Done! Launcher will restart in 3 seconds.";
-            Thread.Sleep(TimeSpan.FromSeconds(3));
-            System.Diagnostics.Process.Start(Application.ResourceAssembly.Location);
+
+            await Task.Delay(3000);
+            Process.Start(Application.ResourceAssembly.Location);
             Application.Current.Shutdown();
+        }
+
+        private void DownloadGameFiles(IProgress<DownloadState> progress)
+        {
+            string[] packages = new[] { "game_core", "game_trackshigh", $"langpack_{SelectedLanguageOption.PackageKey}" };
+
+            foreach (var packageId in packages)
+            {
+                var response = new Url($"https://cdn.soapboxrace.world/game/{packageId}.zip").SendAsync(
+                    HttpMethod.Get, null, completionOption: HttpCompletionOption.ResponseHeadersRead).Result;
+                var dataStream = response.Content.ReadAsStreamAsync().Result;
+
+                var tmpFile = Path.GetTempFileName();
+                using (FileStream fileStream = new FileStream(tmpFile, FileMode.Create, FileAccess.Write))
+                {
+                    var dataStreamLength = response.Content.Headers.ContentLength ?? throw new Exception("Could not get response with Content-Length!");
+                    DownloadState state = new DownloadState { BytesToGet = dataStreamLength, Message = $"Downloading package: {packageId}" };
+                    byte[] buffer = new byte[1048576];
+                    int bytesRead;
+                    while ((bytesRead = dataStream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        fileStream.Write(buffer, 0, bytesRead);
+                        state.BytesRead = fileStream.Length;
+                        progress.Report(state);
+                    }
+                }
+
+                using (ZipFile zf = new ZipFile(tmpFile))
+                {
+                    zf.ExtractProgress += (o, args) =>
+                    {
+                        if (args.EventType == ZipProgressEventType.Extracting_EntryBytesWritten)
+                        {
+                            progress.Report(new DownloadState
+                            {
+                                Message = $"Extracting... {args.CurrentEntry.FileName}",
+                                BytesRead = args.BytesTransferred,
+                                BytesToGet = args.TotalBytesToTransfer
+                            });
+                        }
+                    };
+                    zf.ExtractAll(Path.Combine(InstallationDirectory, "Data"), ExtractExistingFileAction.OverwriteSilently);
+                }
+
+                File.Delete(tmpFile);
+            }
+        }
+
+        private void HandleDownloadProgress(DownloadState dls)
+        {
+            if (dls.BytesToGet > 0)
+                InstallProgress.ProgressValue = (float)dls.BytesRead / dls.BytesToGet * 100;
+            InstallProgress.ProgressText = dls.Message;
         }
 
         private void CreateRegistryData()
@@ -147,6 +244,7 @@ namespace NextGenLauncher.ViewModel
 
         private void UpdateUserSettings()
         {
+            InstallProgress.ProgressText = "Updating settings...";
             string gameAppDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Need for Speed World");
             Directory.CreateDirectory(gameAppDataFolder);
 
@@ -187,77 +285,6 @@ namespace NextGenLauncher.ViewModel
                     throw new InstallerException("netsh.exe exited with code " + process.ExitCode + " - attempted to execute: netsh.exe " + command);
                 }
             };
-        }
-
-        private void DownloadWorker_OnProgressChanged(object sender, ProgressChangedEventArgs e)
-        {
-            if (e.UserState is DownloadState dls)
-            {
-                if (dls.BytesToGet > 0)
-                    InstallProgress.ProgressValue = (float)dls.BytesRead / dls.BytesToGet * 100;
-                InstallProgress.ProgressText = dls.Message;
-            }
-            else
-            {
-                throw new ArgumentException("Invalid UserState provided from DownloadWorker progress");
-            }
-        }
-
-        private void DownloadWorker_DoWork(object sender, DoWorkEventArgs e)
-        {
-            BackgroundWorker bgw = (BackgroundWorker)sender;
-            string[] packages = new[] { "game_core", "game_trackshigh", $"langpack_{SelectedLanguageOption.PackageKey}" };
-
-            foreach (var packageId in packages)
-            {
-                Debug.WriteLine(packageId);
-                WebRequest request = WebRequest.Create($"https://cdn.soapboxrace.world/game/{packageId}.zip");
-                WebResponse response = request.GetResponse();
-                long cl = response.ContentLength;
-                using (Stream responseStream = response.GetResponseStream())
-                {
-                    var tmpFile = Path.GetTempFileName();
-                    using (FileStream fileStream = new FileStream(tmpFile, FileMode.Create, FileAccess.Write))
-                    {
-                        DownloadState state = new DownloadState { BytesToGet = cl, Message = $"Downloading package: {packageId}" };
-                        byte[] buffer = new byte[1048576];
-                        int bytesRead;
-                        while ((bytesRead = responseStream.Read(buffer, 0, buffer.Length)) > 0)
-                        {
-                            fileStream.Write(buffer, 0, bytesRead);
-                            state.BytesRead = fileStream.Length;
-                            bgw.ReportProgress(0, state);
-                        }
-                    }
-
-                    using (ZipFile zf = new ZipFile(tmpFile))
-                    {
-                        zf.ExtractProgress += (o, args) =>
-                        {
-                            if (args.EventType == ZipProgressEventType.Extracting_EntryBytesWritten)
-                            {
-                                bgw.ReportProgress(0, new DownloadState
-                                {
-                                    Message = $"Extracting... {args.CurrentEntry.FileName}",
-                                    BytesRead = args.BytesTransferred,
-                                    BytesToGet = args.TotalBytesToTransfer
-                                });
-                            }
-                        };
-                        zf.ExtractAll(Path.Combine(InstallationDirectory, "Data"), ExtractExistingFileAction.OverwriteSilently);
-                    }
-
-                    File.Delete(tmpFile);
-                }
-            }
-
-            InstallProgress.ProgressValue = 0;
-            InstallProgress.ProgressText = "";
-            InstallProgress.IsIndeterminate = true;
-
-            CreateFirewallRules();
-            CreateRegistryData();
-            UpdateUserSettings();
         }
 
         private struct DownloadState

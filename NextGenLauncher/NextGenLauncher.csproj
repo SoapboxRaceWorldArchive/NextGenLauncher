@@ -64,12 +64,25 @@
     <Reference Include="GalaSoft.MvvmLight.Platform, Version=5.4.1.0, Culture=neutral, PublicKeyToken=5f873c45e98af8a1, processorArchitecture=MSIL">
       <HintPath>..\packages\MvvmLightLibs.5.4.1.1\lib\net45\GalaSoft.MvvmLight.Platform.dll</HintPath>
     </Reference>
+    <Reference Include="Microsoft.WindowsAPICodePack, Version=1.1.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\WindowsAPICodePack-Core.1.1.1\lib\Microsoft.WindowsAPICodePack.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.WindowsAPICodePack.Shell, Version=1.1.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\WindowsAPICodePack-Shell.1.1.1\lib\Microsoft.WindowsAPICodePack.Shell.dll</HintPath>
+    </Reference>
+    <Reference Include="Nancy, Version=2.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\Nancy.2.0.0\lib\net452\Nancy.dll</HintPath>
+    </Reference>
+    <Reference Include="Nancy.Hosting.Self, Version=2.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\Nancy.Hosting.Self.2.0.0\lib\net452\Nancy.Hosting.Self.dll</HintPath>
+    </Reference>
     <Reference Include="Newtonsoft.Json, Version=12.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
       <HintPath>..\packages\Newtonsoft.Json.12.0.2\lib\net45\Newtonsoft.Json.dll</HintPath>
     </Reference>
     <Reference Include="PresentationFramework.Aero2" />
     <Reference Include="System" />
     <Reference Include="System.Data" />
+    <Reference Include="System.Management" />
     <Reference Include="System.Windows.Interactivity, Version=4.5.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
       <HintPath>..\packages\MvvmLightLibs.5.4.1.1\lib\net45\System.Windows.Interactivity.dll</HintPath>
     </Reference>
@@ -98,11 +111,17 @@
     <Compile Include="Exceptions\InvalidServerListException.cs" />
     <Compile Include="Exceptions\ModSystemException.cs" />
     <Compile Include="Exceptions\PlayException.cs" />
+    <Compile Include="Exceptions\SecurityException.cs" />
     <Compile Include="InstallationWindow.xaml.cs">
       <DependentUpon>InstallationWindow.xaml</DependentUpon>
     </Compile>
     <Compile Include="Messages\AuthenticationInfoUpdatedMessage.cs" />
     <Compile Include="Messages\ServerListUpdatedMessage.cs" />
+    <Compile Include="Proxy\ServerProxy.cs" />
+    <Compile Include="Proxy\ServerProxyBootstrapper.cs" />
+    <Compile Include="Proxy\ServerProxyCompression.cs" />
+    <Compile Include="Proxy\ServerProxyException.cs" />
+    <Compile Include="Proxy\ServerProxyHandler.cs" />
     <Compile Include="ServerModels\LoginStatusVO.cs" />
     <Compile Include="ServerModels\ModIndex.cs" />
     <Compile Include="ServerModels\ModSystemInfo.cs" />
@@ -112,6 +131,7 @@
     <Compile Include="Services\Servers\AuthenticationInfo.cs" />
     <Compile Include="Services\Servers\IServerListSource.cs" />
     <Compile Include="Services\Servers\RemoteListSource.cs" />
+    <Compile Include="Utils\HardwareIdGenerator.cs" />
     <Compile Include="Utils\HashUtil.cs" />
     <Compile Include="Utils\BindingProxy.cs" />
     <Compile Include="Utils\PasswordBoxAssistant.cs" />
